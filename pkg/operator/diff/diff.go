@@ -14,7 +14,6 @@ import (
 
 	"github.com/operator-framework/operator-registry/alpha/action"
 	"github.com/operator-framework/operator-registry/alpha/declcfg"
-	"github.com/operator-framework/operator-registry/alpha/model"
 	"github.com/operator-framework/operator-registry/pkg/image"
 )
 
@@ -45,7 +44,7 @@ func (diffIn Diff) Run(ctx context.Context) (*declcfg.DeclarativeConfig, error) 
 	mask := action.RefDCDir | action.RefDCImage | action.RefSqliteFile | action.RefSqliteImage
 
 	// Heads-only mode does not require an old ref, so there may be nothing to render.
-	var oldModel model.Model
+	var oldModel diffInternal.DiffModel
 	if len(diffIn.OldRefs) != 0 {
 		oldRender := action.Render{Refs: diffIn.OldRefs, Registry: diffIn.Registry, AllowedRefMask: mask}
 		oldCfg, err := oldRender.Run(ctx)
@@ -55,7 +54,7 @@ func (diffIn Diff) Run(ctx context.Context) (*declcfg.DeclarativeConfig, error) 
 			}
 			return nil, fmt.Errorf("error rendering old refs: %v", err)
 		}
-		oldModel, err = declcfg.ConvertToModel(*oldCfg)
+		oldModel, err = diffInternal.ConvertDeclcfgToDiffModel(*oldCfg)
 		if err != nil {
 			return nil, fmt.Errorf("error converting old declarative config to model: %v", err)
 		}
@@ -69,7 +68,7 @@ func (diffIn Diff) Run(ctx context.Context) (*declcfg.DeclarativeConfig, error) 
 		}
 		return nil, fmt.Errorf("error rendering new refs: %v", err)
 	}
-	newModel, err := declcfg.ConvertToModel(*newCfg)
+	newModel, err := diffInternal.ConvertDeclcfgToDiffModel(*newCfg)
 	if err != nil {
 		return nil, fmt.Errorf("error converting new declarative config to model: %v", err)
 	}
@@ -86,7 +85,7 @@ func (diffIn Diff) Run(ctx context.Context) (*declcfg.DeclarativeConfig, error) 
 		return nil, fmt.Errorf("error generating diff: %v", err)
 	}
 
-	cfg := declcfg.ConvertFromModel(diffModel)
+	cfg := diffInternal.ConvertDiffModelToDeclcfg(diffModel)
 	return &cfg, nil
 }
 

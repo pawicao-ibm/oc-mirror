@@ -7,8 +7,6 @@ import (
 	"github.com/blang/semver/v4"
 	"github.com/sirupsen/logrus"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-
-	"github.com/operator-framework/operator-registry/alpha/model"
 )
 
 // DiffIncludeConfig configures Diff.Run() to include a set of packages,
@@ -22,7 +20,7 @@ type DiffIncludeConfig struct {
 }
 
 // DiffIncluder knows how to add packages, channels, and bundles
-// from a source to a destination model.Model.
+// from a source to a destination DiffModel.
 type DiffIncluder struct {
 	// Packages to add.
 	Packages []DiffIncludePackage
@@ -76,7 +74,7 @@ func (dip DiffIncludePackage) Validate() error {
 
 	var isChannelSet bool
 	for _, ch := range dip.Channels {
-		isChannelSet = ch.isChannelSet()
+		// isChannelSet = ch.isChannelSet()
 		err := ch.Validate()
 		if err != nil {
 			errs = append(errs, err)
@@ -106,7 +104,7 @@ func (dic DiffIncludeChannel) Validate() error {
 	}
 
 	if dic.Range != nil && (len(dic.Versions) != 0 || len(dic.Bundles) != 0) {
-		errs = append(errs, fmt.Errorf("Channel %q: range and versions/bundles are mutually exclusive", dic.Name))
+		errs = append(errs, fmt.Errorf("channel %q: range and versions/bundles are mutually exclusive", dic.Name))
 	}
 
 	if len(errs) != 0 {
@@ -133,7 +131,7 @@ func (i DiffIncluder) Validate() error {
 // Run adds all packages and channels in DiffIncluder with matching names
 // directly, and all versions plus their upgrade graphs to channel heads,
 // from newModel to outputModel.
-func (i DiffIncluder) Run(newModel, outputModel model.Model) error {
+func (i DiffIncluder) Run(newModel, outputModel DiffModel) error {
 	var includeErrs []error
 	if err := i.Validate(); err != nil {
 		includeErrs = append(includeErrs, err)
@@ -154,7 +152,7 @@ func (i DiffIncluder) Run(newModel, outputModel model.Model) error {
 // includeNewInOutputModel adds all packages, channels, and range (or versions/bundles)
 // specified by ipkg that exist in newModel to outputModel. Any package, channel,
 // or version in ipkg not satisfied by newModel is an error.
-func (ipkg DiffIncludePackage) includeNewInOutputModel(newModel, outputModel model.Model, logger *logrus.Entry) (ierrs []error) {
+func (ipkg DiffIncludePackage) includeNewInOutputModel(newModel, outputModel DiffModel, logger *logrus.Entry) (ierrs []error) {
 
 	newPkg, newHasPkg := newModel[ipkg.Name]
 	if !newHasPkg {
@@ -223,8 +221,8 @@ func (ipkg DiffIncludePackage) includeNewInOutputModel(newModel, outputModel mod
 		}
 		chLog := pkgLog.WithField("channel", newCh.Name)
 
-		var bundles []*model.Bundle
-		var head *model.Bundle
+		var bundles []*DiffBundle
+		var head *DiffBundle
 		var err error
 		// No versions have been specified, but heads-only set to true, get the channel head only.
 		switch {
@@ -257,7 +255,7 @@ func (ipkg DiffIncludePackage) includeNewInOutputModel(newModel, outputModel mod
 // and their upgrade graph(s) to ch.Head().
 // If skipMissingBundles is true, bundle names and versions not satisfied by bundles in ch
 // will not result in errors.
-func getBundlesForVersions(ch *model.Channel, vers []semver.Version, names []string, logger *logrus.Entry, skipMissingBundles bool) (bundles []*model.Bundle, err error) {
+func getBundlesForVersions(ch *DiffChannel, vers []semver.Version, names []string, logger *logrus.Entry, skipMissingBundles bool) (bundles []*DiffBundle, err error) {
 
 	// Short circuit when no versions were specified, meaning "include the whole channel".
 	if len(vers) == 0 {
@@ -316,7 +314,7 @@ func getBundlesForVersions(ch *model.Channel, vers []semver.Version, names []str
 
 // getBundlesForRange returns all bundles matching the version range in vers
 // If the range is nil, return all bundles in the channel
-func getBundlesForRange(ch *model.Channel, vers semver.Range) (bundles []*model.Bundle, err error) {
+func getBundlesForRange(ch *DiffChannel, vers semver.Range) (bundles []*DiffBundle, err error) {
 	// Short circuit when an empty range was specified, meaning "include the whole channel"
 	if vers == nil {
 		for _, b := range ch.Bundles {
@@ -343,13 +341,13 @@ func getBundlesForRange(ch *model.Channel, vers semver.Range) (bundles []*model.
 // for each included bundle because there might be leaf nodes
 // in the upgrade graph for a particular version not captured
 // by any other fill due to skips not being honored here.
-func fillUpgradeGraph(ch *model.Channel, bundles []*model.Bundle, logger *logrus.Entry) (bd []*model.Bundle, err error) {
+func fillUpgradeGraph(ch *DiffChannel, bundles []*DiffBundle, logger *logrus.Entry) (bd []*DiffBundle, err error) {
 	head, err := ch.Head()
 	if err != nil {
 		return nil, err
 	}
 	graph := makeUpgradeGraph(ch)
-	bundleSet := map[string]*model.Bundle{}
+	bundleSet := map[string]*DiffBundle{}
 	for _, ib := range bundles {
 		if _, addedBundle := bundleSet[ib.Name]; addedBundle {
 			// A prior graph traverse already included this bundle.
@@ -373,8 +371,8 @@ func fillUpgradeGraph(ch *model.Channel, bundles []*model.Bundle, logger *logrus
 }
 
 // makeUpgradeGraph creates a DAG of bundles with map key Bundle.Replaces.
-func makeUpgradeGraph(ch *model.Channel) map[string][]*model.Bundle {
-	graph := map[string][]*model.Bundle{}
+func makeUpgradeGraph(ch *DiffChannel) map[string][]*DiffBundle {
+	graph := map[string][]*DiffBundle{}
 	for _, b := range ch.Bundles {
 		if b.Replaces != "" {
 			graph[b.Replaces] = append(graph[b.Replaces], b)
@@ -391,14 +389,14 @@ func makeUpgradeGraph(ch *model.Channel) map[string][]*model.Bundle {
 // Output bundle order is not guaranteed.
 // Precondition: start must be a bundle in ch.
 // Precondition: end must be ch's head.
-func findIntersectingBundles(ch *model.Channel, start, end *model.Bundle, graph map[string][]*model.Bundle) ([]*model.Bundle, bool) {
+func findIntersectingBundles(ch *DiffChannel, start, end *DiffBundle, graph map[string][]*DiffBundle) ([]*DiffBundle, bool) {
 	// The intersecting set is equal to end if start is end.
 	if start.Name == end.Name {
-		return []*model.Bundle{end}, true
+		return []*DiffBundle{end}, true
 	}
 
 	// Construct start's replaces chain for comparison against end's.
-	startChain := map[string]*model.Bundle{start.Name: nil}
+	startChain := map[string]*DiffBundle{start.Name: nil}
 	for curr := start; curr != nil && curr.Replaces != ""; curr = ch.Bundles[curr.Replaces] {
 		startChain[curr.Replaces] = curr
 	}
@@ -424,10 +422,10 @@ func findIntersectingBundles(ch *model.Channel, start, end *model.Bundle, graph 
 	// Find all bundles that replace the intersection via BFS,
 	// i.e. the set of bundles that fill the update graph between start and end.
 	replacesIntersection := graph[intersection]
-	replacesSet := map[string]*model.Bundle{}
+	replacesSet := map[string]*DiffBundle{}
 	for _, b := range replacesIntersection {
 		currName := ""
-		for next := []*model.Bundle{b}; len(next) > 0; next = next[1:] {
+		for next := []*DiffBundle{b}; len(next) > 0; next = next[1:] {
 			currName = next[0].Name
 			if _, hasReplaces := replacesSet[currName]; !hasReplaces {
 				replacers := graph[currName]
@@ -446,7 +444,7 @@ func findIntersectingBundles(ch *model.Channel, start, end *model.Bundle, graph 
 	// Ensure both start and end are added to the output.
 	replacesSet[start.Name] = start
 	replacesSet[end.Name] = end
-	var intersectingBundles []*model.Bundle
+	var intersectingBundles []*DiffBundle
 	for _, b := range replacesSet {
 		intersectingBundles = append(intersectingBundles, b)
 	}

@@ -56,14 +56,14 @@ func (g *DiffGenerator) init() {
 // - If in heads-only mode (oldModel == nil), then the heads of channels are added to the output.
 // - If in latest mode, a diff between old and new Models is added to the output.
 // - Dependencies are added in all modes if g.SkipDependencies is false.
-func (g *DiffGenerator) Run(oldModel, newModel model.Model) (model.Model, error) {
+func (g *DiffGenerator) Run(oldModel, newModel DiffModel) (DiffModel, error) {
 	g.init()
 
 	// TODO(estroz): loading both oldModel and newModel into memory may
 	// exceed process/hardware limits. Instead, store models on-disk then
 	// load by package.
 
-	outputModel := model.Model{}
+	outputModel := DiffModel{}
 
 	// Prunes old objects from outputModel if they exist.
 	latestPruneFromOutput := func() error {
@@ -204,7 +204,7 @@ type ChannelPriorityPropList []property.Channel
 
 // setDefaultChannel sets the new default channel of a package if the old default channel got filtered out.
 // Throws an error if there are no channels with the Priority property
-func setDefaultChannel(outputPkg *model.Package) error {
+func setDefaultChannel(outputPkg *DiffPackage) error {
 	p := make(ChannelPriorityPropList, len(outputPkg.Channels))
 	i := 0
 	for _, channel := range outputPkg.Channels {
@@ -243,7 +243,7 @@ func setDefaultChannel(outputPkg *model.Package) error {
 
 // pruneOldFromNewPackage prune any bundles and channels from newPkg that
 // are in oldPkg, but not those that differ in any way.
-func pruneOldFromNewPackage(oldPkg, newPkg *model.Package) error {
+func pruneOldFromNewPackage(oldPkg, newPkg *DiffPackage) error {
 	for _, newCh := range newPkg.Channels {
 		oldCh, oldHasCh := oldPkg.Channels[newCh.Name]
 		if !oldHasCh {
@@ -275,7 +275,7 @@ func pruneOldFromNewPackage(oldPkg, newPkg *model.Package) error {
 }
 
 // bundlesEqual computes then compares the hashes of b1 and b2 for equality.
-func bundlesEqual(b1, b2 *model.Bundle) (bool, error) {
+func bundlesEqual(b1, b2 *DiffBundle) (bool, error) {
 	// Use a declarative config bundle type to avoid infinite recursion.
 	dcBundle1 := convertFromModelBundle(b1)
 	dcBundle2 := convertFromModelBundle(b2)
@@ -292,10 +292,10 @@ func bundlesEqual(b1, b2 *model.Bundle) (bool, error) {
 	return hash1 == hash2 && b1.CsvJSON == b2.CsvJSON && reflect.DeepEqual(b1.Objects, b2.Objects), nil
 }
 
-func addAllDependencies(newModel, oldModel, outputModel model.Model) error {
+func addAllDependencies(newModel, oldModel, outputModel DiffModel) error {
 	// Get every oldModel's bundle's dependencies, and their dependencies, etc. by BFS.
-	providingBundlesByPackage := map[string][]*model.Bundle{}
-	var visitedBundles []*model.Bundle
+	providingBundlesByPackage := map[string][]*DiffBundle{}
+	var visitedBundles []*DiffBundle
 	for currentList := getBundles(outputModel); len(currentList) != 0; {
 		visitedBundles = append(visitedBundles, currentList...)
 		reqGVKs, reqPkgs, err := findDependencies(currentList)
@@ -336,7 +336,7 @@ func addAllDependencies(newModel, oldModel, outputModel model.Model) error {
 	// or the entire package if oldModel does not have it.
 	for pkgName, bundles := range providingBundlesByPackage {
 		newPkg := newModel[pkgName]
-		heads := make(map[string]*model.Bundle, len(newPkg.Channels))
+		heads := make(map[string]*DiffBundle, len(newPkg.Channels))
 		for _, ch := range newPkg.Channels {
 			var err error
 			if heads[ch.Name], err = ch.Head(); err != nil {
@@ -359,8 +359,8 @@ func addAllDependencies(newModel, oldModel, outputModel model.Model) error {
 			// Continue if b was added in a previous loop iteration.
 			// Otherwise create a new package/channel for b if they do not exist.
 			var (
-				outputPkg *model.Package
-				outputCh  *model.Channel
+				outputPkg *DiffPackage
+				outputCh  *DiffChannel
 
 				outHasPkg, outHasCh bool
 			)
@@ -397,12 +397,12 @@ func addAllDependencies(newModel, oldModel, outputModel model.Model) error {
 	return nil
 }
 
-func difference(a, b []*model.Bundle) []*model.Bundle {
-	aMap := make(map[*model.Bundle]struct{})
+func difference(a, b []*DiffBundle) []*DiffBundle {
+	aMap := make(map[*DiffBundle]struct{})
 	for _, bd := range a {
 		aMap[bd] = struct{}{}
 	}
-	uniqueBundles := make([]*model.Bundle, 0)
+	uniqueBundles := make([]*DiffBundle, 0)
 	for _, bd := range b {
 		if _, present := aMap[bd]; !present {
 			uniqueBundles = append(uniqueBundles, bd)
@@ -413,7 +413,7 @@ func difference(a, b []*model.Bundle) []*model.Bundle {
 
 // getBundles collects all bundles specified by m. Since each bundle
 // references its package, their uniqueness property holds in a flat list.
-func getBundles(m model.Model) (bundles []*model.Bundle) {
+func getBundles(m DiffModel) (bundles []*DiffBundle) {
 	for _, pkg := range m {
 		for _, ch := range pkg.Channels {
 			for _, b := range ch.Bundles {
@@ -426,18 +426,14 @@ func getBundles(m model.Model) (bundles []*model.Bundle) {
 
 // findDependencies finds all GVK and package dependencies and indexes them
 // by the apropriate key for lookups.
-func findDependencies(bundles []*model.Bundle) (map[property.GVK]struct{}, map[string][]semver.Range, error) {
+func findDependencies(bundles []*DiffBundle) (map[property.GVK]struct{}, map[string][]semver.Range, error) {
 	// Find all dependencies of bundles in the output model.
 	reqGVKs := map[property.GVK]struct{}{}
 	reqPkgs := map[string][]semver.Range{}
 	for _, b := range bundles {
 
 		for _, gvkReq := range b.PropertiesP.GVKsRequired {
-			gvk := property.GVK{
-				Group:   gvkReq.Group,
-				Version: gvkReq.Version,
-				Kind:    gvkReq.Kind,
-			}
+			gvk := property.GVK(gvkReq)
 			reqGVKs[gvk] = struct{}{}
 		}
 
@@ -462,16 +458,16 @@ func findDependencies(bundles []*model.Bundle) (map[property.GVK]struct{}, map[s
 
 // getBundlesThatProvide returns the latest-version bundles in pkg that provide
 // a GVK or version in reqGVKs or reqPkgs, respectively.
-func getBundlesThatProvide(pkg *model.Package, reqGVKs map[property.GVK]struct{}, reqPkgs map[string][]semver.Range) (providingBundles []*model.Bundle) {
+func getBundlesThatProvide(pkg *DiffPackage, reqGVKs map[property.GVK]struct{}, reqPkgs map[string][]semver.Range) (providingBundles []*DiffBundle) {
 	// Pre-allocate the amount of space needed for all ranges
 	// specified by requiring bundles.
-	var bundlesByRange [][]*model.Bundle
+	var bundlesByRange [][]*DiffBundle
 	ranges, isPkgRequired := reqPkgs[pkg.Name]
 	if isPkgRequired {
-		bundlesByRange = make([][]*model.Bundle, len(ranges))
+		bundlesByRange = make([][]*DiffBundle, len(ranges))
 	}
 	// Collect package bundles that provide a GVK or are in a range.
-	bundlesProvidingGVK := make(map[property.GVK][]*model.Bundle)
+	bundlesProvidingGVK := make(map[property.GVK][]*DiffBundle)
 	for _, ch := range pkg.Channels {
 		for _, b := range ch.Bundles {
 			for _, gvk := range b.PropertiesP.GVKs {
@@ -488,7 +484,7 @@ func getBundlesThatProvide(pkg *model.Package, reqGVKs map[property.GVK]struct{}
 	}
 
 	// Sort bundles providing a GVK by version and use the latest version.
-	latestBundles := make(map[string]*model.Bundle)
+	latestBundles := make(map[string]*DiffBundle)
 	for gvk, bundles := range bundlesProvidingGVK {
 		sort.Slice(bundles, func(i, j int) bool {
 			// sort by version
@@ -539,7 +535,7 @@ func getBundlesThatProvide(pkg *model.Package, reqGVKs map[property.GVK]struct{}
 	return providingBundles
 }
 
-func convertFromModelBundle(b *model.Bundle) declcfg.Bundle {
+func convertFromModelBundle(b *DiffBundle) declcfg.Bundle {
 	return declcfg.Bundle{
 		Schema:        declcfg.SchemaBundle,
 		Name:          b.Name,
@@ -552,11 +548,13 @@ func convertFromModelBundle(b *model.Bundle) declcfg.Bundle {
 	}
 }
 
-func copyPackageNoChannels(in *model.Package) *model.Package {
-	cp := &model.Package{
-		Name:        in.Name,
-		Description: in.Description,
-		Channels:    make(map[string]*model.Channel, len(in.Channels)),
+func copyPackageNoChannels(in *DiffPackage) *DiffPackage {
+	cp := &DiffPackage{
+		Package: model.Package{
+			Name:        in.Name,
+			Description: in.Description,
+		},
+		Channels: make(map[string]*DiffChannel, len(in.Channels)),
 	}
 	if in.Icon != nil {
 		cp.Icon = &model.Icon{
@@ -568,7 +566,7 @@ func copyPackageNoChannels(in *model.Package) *model.Package {
 	return cp
 }
 
-func copyPackage(in *model.Package) *model.Package {
+func copyPackage(in *DiffPackage) *DiffPackage {
 	cp := copyPackageNoChannels(in)
 	for _, ch := range in.Channels {
 		cp.Channels[ch.Name] = copyChannel(ch, cp)
@@ -576,17 +574,19 @@ func copyPackage(in *model.Package) *model.Package {
 	return cp
 }
 
-func copyChannelNoBundles(in *model.Channel, pkg *model.Package) *model.Channel {
-	cp := &model.Channel{
-		Name:       in.Name,
-		Package:    pkg,
-		Bundles:    make(map[string]*model.Bundle, len(in.Bundles)),
+func copyChannelNoBundles(in *DiffChannel, pkg *DiffPackage) *DiffChannel {
+	cp := &DiffChannel{
+		Channel: model.Channel{
+			Name:    in.Name,
+			Package: &pkg.Package,
+		},
+		Bundles:    make(map[string]*DiffBundle, len(in.Bundles)),
 		Properties: in.Properties,
 	}
 	return cp
 }
 
-func copyChannel(in *model.Channel, pkg *model.Package) *model.Channel {
+func copyChannel(in *DiffChannel, pkg *DiffPackage) *DiffChannel {
 	cp := copyChannelNoBundles(in, pkg)
 	for _, b := range in.Bundles {
 		cp.Bundles[b.Name] = copyBundle(b, cp, pkg)
@@ -594,16 +594,18 @@ func copyChannel(in *model.Channel, pkg *model.Package) *model.Channel {
 	return cp
 }
 
-func copyBundle(in *model.Bundle, ch *model.Channel, pkg *model.Package) *model.Bundle {
-	cp := &model.Bundle{
-		Name:      in.Name,
-		Channel:   ch,
-		Package:   pkg,
-		Image:     in.Image,
-		Replaces:  in.Replaces,
-		Version:   semver.MustParse(in.Version.String()),
-		CsvJSON:   in.CsvJSON,
-		SkipRange: in.SkipRange,
+func copyBundle(in *DiffBundle, ch *DiffChannel, pkg *DiffPackage) *DiffBundle {
+	cp := &DiffBundle{
+		Bundle: model.Bundle{
+			Name:      in.Name,
+			Image:     in.Image,
+			Replaces:  in.Replaces,
+			Version:   semver.MustParse(in.Version.String()),
+			CsvJSON:   in.CsvJSON,
+			SkipRange: in.SkipRange,
+		},
+		Channel: ch,
+		Package: pkg,
 	}
 	if in.PropertiesP != nil {
 		cp.PropertiesP = new(property.Properties)
